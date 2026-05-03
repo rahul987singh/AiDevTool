@@ -1,0 +1,26 @@
+# Visual Studio / Rider
+.vs/
+.vscode/
+**/bin/
+**/obj/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+
+# Logs
+*.log
+
+# Build outputs
+/publish/
+
+# Ignore SKWebChatBot per request
+SKWebChatBot/
+
+# Ignore NuGet packages
+**/packages/
