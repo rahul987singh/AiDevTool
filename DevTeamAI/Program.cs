@@ -1,135 +1,128 @@
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Configuration;
 using DevTeamAI.LLM.Services;
+using DevTeamAI.Plugins;
+using Microsoft.Extensions.Logging;
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.Agents;
+using Microsoft.SemanticKernel.Agents.Chat;
+using Microsoft.SemanticKernel.ChatCompletion;
 
-var builder = Host.CreateApplicationBuilder(args);
-
-// Add configuration
-builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
-
-// Add LLM services
-builder.Services.AddLLMServices(builder.Configuration);
-
-// Add our application service
-builder.Services.AddTransient<DevTeamAIApplication>();
-
-var host = builder.Build();
-
-// Run the application
-await host.Services.GetRequiredService<DevTeamAIApplication>().RunAsync();
+namespace DevTeamAI;
 
 public class DevTeamAIApplication
 {
     private readonly LLMService _llmService;
     private readonly ILogger<DevTeamAIApplication> _logger;
+    private readonly Kernel _kernel;
 
     public DevTeamAIApplication(LLMService llmService, ILogger<DevTeamAIApplication> logger)
     {
         _llmService = llmService;
         _logger = logger;
+
+        // 1. Get the Kernel from your DLL
+        _kernel = _llmService.GetKernel();
+
+        // 2. Register the Plugins
+        // These provide the 'tools' for the Architect and Developer
+        _kernel.Plugins.AddFromObject(new FileSystemPlugin(), "FileSystem");
+        _kernel.Plugins.AddFromObject(new MermaidPlugin(), "ArchitectTools");
     }
 
     public async Task RunAsync()
     {
-        Console.WriteLine("🤖 DevTeamAI LLM Console Application");
-        Console.WriteLine("=====================================");
-        
-        // Check if LLM service is available
-        if (!_llmService.IsKernelAvailable())
+        Console.WriteLine("🤖 DevTeamAI Multi-Agent System Activated");
+        Console.WriteLine("==========================================");
+
+        // 3. Define the Specialized Agents
+        var designer = new ChatCompletionAgent()
         {
-            _logger.LogError("❌ LLM service is not available");
-            Console.WriteLine("❌ LLM service failed to initialize. Check logs for details.");
-            Console.WriteLine("Press any key to exit...");
-            Console.ReadKey();
-            return;
-        }
+            Name = "ProductDesigner",
+            Instructions = "You are a Product Designer. Convert user ideas into a JSON requirement spec. Define Entities, UserRoles, and PrimaryActions. Output ONLY the JSON.",
+            Kernel = _kernel
+        };
 
-        Console.WriteLine("✅ LLM service initialized successfully!");
-        Console.WriteLine("🚀 GPU/DirectML acceleration enabled with CPU fallback");
-        Console.WriteLine();
-        Console.WriteLine("Type 'exit' to quit, 'help' for commands");
-        Console.WriteLine();
-
-        var chatHistory = new List<ChatMessage>();
-
-        while (true)
+        var architect = new ChatCompletionAgent()
         {
-            Console.Write("You: ");
-            var input = Console.ReadLine();
-            
-            if (string.IsNullOrWhiteSpace(input)) continue;
-            
-            if (input.ToLower() == "exit")
+            Name = "SystemsArchitect",
+            Instructions = "You are a Systems Architect. Analyze the JSON requirements and design a technical blueprint. You MUST use the ArchitectTools-SaveDatabaseDiagram tool to save a Mermaid diagram of the schema.",
+            Kernel = _kernel
+        };
+
+        var developer = new ChatCompletionAgent()
+        {
+            Name = "DotNetDeveloper",
+            Instructions = "You are a Senior .NET Developer. Write Minimal API C# code based on the Architect's design. You MUST use the FileSystem-WriteFile tool to save .cs and .csproj files to disk. Ensure code is complete and has all necessary using statements.",
+            Kernel = _kernel
+        };
+
+        // 4. Define Orchestration
+        AgentGroupChat chat = new(designer, architect, developer)
+        {
+            ExecutionSettings = new()
             {
-                Console.WriteLine("👋 Goodbye!");
-                break;
-            }
-
-            if (input.ToLower() == "help")
-            {
-                ShowHelp();
-                continue;
-            }
-
-            if (input.ToLower() == "clear")
-            {
-                chatHistory.Clear();
-                Console.WriteLine("🗑️ Chat history cleared.");
-                continue;
-            }
-
-            if (input.ToLower() == "status")
-            {
-                ShowStatus();
-                continue;
-            }
-
-            try
-            {
-                Console.Write("Assistant: ");
-                var userMessage = new ChatMessage { Role = "User", Content = input };
-                
-                // Get non-streaming response to test tokenizer
-                var response = await _llmService.GetChatResponseAsync(input, chatHistory);
-                Console.WriteLine(response);
-
-                // Add to chat history
-                chatHistory.Add(userMessage);
-                chatHistory.Add(new ChatMessage { Role = "Assistant", Content = response });
-
-                // Keep chat history manageable (last 10 exchanges)
-                if (chatHistory.Count > 20)
+                // Force the order: Designer -> Architect -> Developer
+                SelectionStrategy = new SequentialSelectionStrategy()
                 {
-                    chatHistory.RemoveRange(0, 2);
+                    InitialAgent = designer
+                },
+                // Pause after the Architect to allow for Human Approval
+                TerminationStrategy = new ApprovalTerminationStrategy()
+            }
+        };
+
+        Console.Write("\nDescribe your project idea (e.g., 'I want a task manager'): ");
+        string? input = Console.ReadLine();
+        if (string.IsNullOrWhiteSpace(input)) return;
+
+        // 5. Start the Agentic Flow
+        chat.AddChatMessage(new ChatMessageContent(AuthorRole.User, input));
+
+        try
+        {
+            await foreach (var response in chat.InvokeAsync())
+            {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine($"\n--- {response.AuthorName?.ToUpper()} ---");
+                Console.ResetColor();
+                Console.WriteLine(response.Content);
+
+                // HITL GATE: This logic triggers when the TerminationStrategy returns 'true'
+                if (response.AuthorName == "SystemsArchitect")
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("\n[GATE] Review the design above. Type 'APPROVE' to allow the Developer to write code, or anything else to exit:");
+                    Console.ResetColor();
+
+                    string? gateInput = Console.ReadLine();
+                    if (gateInput?.ToUpper() != "APPROVE")
+                    {
+                        Console.WriteLine("❌ Project halted by user.");
+                        return;
+                    }
+
+                    Console.WriteLine("🚀 Approval received. Handing off to Developer...");
                 }
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "❌ Error processing LLM request");
-                Console.WriteLine($"❌ Error: {ex.Message}");
-            }
-            
-            Console.WriteLine();
+
+            Console.WriteLine("\n✅ Project generation complete! Check the 'GeneratedCode' folder.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during agentic workflow execution.");
+            Console.WriteLine($"❌ Error: {ex.Message}");
         }
     }
 
-    private void ShowHelp()
+    /// <summary>
+    /// Custom strategy to pause the conversation after the Architect finishes.
+    /// </summary>
+    private class ApprovalTerminationStrategy : TerminationStrategy
     {
-        Console.WriteLine("Available commands:");
-        Console.WriteLine("  help   - Show this help message");
-        Console.WriteLine("  clear  - Clear chat history");
-        Console.WriteLine("  status - Show LLM service status");
-        Console.WriteLine("  exit   - Exit the application");
-        Console.WriteLine();
-    }
-
-    private void ShowStatus()
-    {
-        Console.WriteLine("🔍 LLM Service Status:");
-        Console.WriteLine($"  Available: {_llmService.IsKernelAvailable()}");
-        Console.WriteLine($"  Kernel: {_llmService.GetKernel()?.GetType().Name ?? "N/A"}");
-        Console.WriteLine();
+        protected override Task<bool> ShouldAgentTerminateAsync(Agent agent, IReadOnlyList<ChatMessageContent> history, CancellationToken cancellationToken)
+        {
+            // Terminate the automatic loop specifically after the Architect speaks.
+            // This returns control to the 'await foreach' loop in RunAsync.
+            return Task.FromResult(agent.Name == "SystemsArchitect");
+        }
     }
 }
